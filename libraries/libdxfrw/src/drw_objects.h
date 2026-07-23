@@ -232,6 +232,11 @@ struct DRW_UnsupportedObject {
     UTF8STRING m_recordName;
     UTF8STRING m_className;
     std::vector<std::uint8_t> m_rawBytes;
+    // Raw object bytes are only valid for the DWG version that encoded them.
+    // Keep the provenance with the bytes so direct writer users cannot
+    // accidentally replay an otherwise unlabelled carrier into another format.
+    // Append it to preserve the layout of the long-standing carrier fields.
+    DRW::Version m_version = DRW::UNKNOWNV;
 };
 
 //! Lossless carrier for non-object DWG data sections preserved byte-for-byte.
@@ -274,10 +279,16 @@ public:
 class DRW_ImageDefinitionReactor : public DRW_TableEntry {
     SETOBJFRIENDS
 public:
+    // File-local custom class ordinal; matches dwgWriter bootstrap (532).
+    static constexpr std::uint16_t kDwgClassNum = 532;
+
     DRW_ImageDefinitionReactor() { tType = DRW::IMAGEDEFREACTOR; }
 protected:
     bool parseCode(int code, const std::unique_ptr<dxfReader>& reader) override;
     bool parseDwg(DRW::Version version, dwgBuffer *buf, std::uint32_t bs=0) override;
+    [[nodiscard]] bool encodeDwg(DRW::Version version, dwgBufferW *buf,
+                                  dwgBufferW *strBuf = nullptr,
+                                  dwgBufferW *handleBuf = nullptr) const;
 public:
     std::int32_t m_classVersion = 0;
 };
@@ -921,6 +932,10 @@ public:
 protected:
     bool parseCode(int code, const std::unique_ptr<dxfReader>& reader) override;
     bool parseDwg(DRW::Version version, dwgBuffer *buf, std::uint32_t bs=0) override;
+    /// Inverse of parseDwg. Fixed DWG object type 102 (no CLASSES entry).
+    [[nodiscard]] bool encodeDwg(DRW::Version version, dwgBufferW *buf,
+                                  dwgBufferW *strBuf = nullptr,
+                                  dwgBufferW *handleBuf = nullptr) const;
 
 public:
 //    std::string handle;       /*!< entity identifier, code 5 */
@@ -1362,7 +1377,9 @@ public:
 class DRW_DataTable : public DRW_TableEntry {
     SETOBJFRIENDS
 public:
-    static constexpr std::uint16_t kDwgClassNum = 520;
+    // 520 is MESH (AcDbSubDMesh) in the writer's fixed entity class map.
+    // DATATABLE is an object class — keep it off the MESH ordinal.
+    static constexpr std::uint16_t kDwgClassNum = 531;
 
     //! One cell of a DATATABLE column.  A cell always carries all three
     //! variants on the wire (long/double/string); the column's type selects
@@ -1533,8 +1550,8 @@ public:
     bool m_fitToScreen = false;   /*!< code 290 */
     bool m_maintainAspect = false;/*!< code 291 */
     bool m_useTiling = false;     /*!< code 292 */
-    DRW_Coord m_offset;           /*!< code 140/240 */
-    DRW_Coord m_scale{1.0, 1.0, 0.0}; /*!< code 142/242 */
+    DRW_Coord m_offset;           /*!< image codes 140/141 */
+    DRW_Coord m_scale{1.0, 1.0, 0.0}; /*!< image codes 142/143 */
     /* ibl */
     UTF8STRING m_iblName;         /*!< ibl code 1 */
     bool m_enabled = false;       /*!< ibl code 290(#1) */

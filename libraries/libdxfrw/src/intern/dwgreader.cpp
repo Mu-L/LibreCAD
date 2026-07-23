@@ -353,6 +353,13 @@ bool dwgReader::readDwgHandles(dwgBuffer *dbuf, std::uint64_t offset, std::uint6
     DRW_DBG("\nSection HANDLES size= "); DRW_DBG(size);
     DRW_DBG("\nSection HANDLES maxPos= "); DRW_DBG(maxPos);
 
+    // Each entry is >= 2 bytes (a 1-byte-minimum modular-char handle delta +
+    // a 1-byte-minimum modular-char location delta), so size/2 is a safe
+    // upper bound on entry count. Avoids repeated rehashing while the loop
+    // below fills ObjectMap -- large DWGs have hundreds of thousands of
+    // handles.
+    ObjectMap.reserve(size / 2);
+
     std::uint64_t startPos = offset;
     bool end = false;
 
@@ -1332,6 +1339,7 @@ bool dwgReader::readDwgEntity(dwgBuffer *dbuf, objHandle& obj, DRW_Interface& in
     buff.resetPosition();
     auto makeRawEntity = [&](int rawType, const DRW_Class *cls = nullptr) {
         DRW_UnsupportedObject raw;
+        raw.m_version = version;
         raw.m_objectType = rawType;
         raw.m_handle = obj.handle;
         raw.m_bodyBitSize = bs;
@@ -1396,17 +1404,10 @@ bool dwgReader::readDwgEntity(dwgBuffer *dbuf, objHandle& obj, DRW_Interface& in
             entryParse(*a, buff, bs, localRet);
             if (localRet) {
                 a->style = findTableName(DRW::STYLE, a->styleH.ref);
-                const std::uint32_t ownerH = a->parentHandle;
-                auto pendIt = m_pendingInserts.find(ownerH);
-                if (pendIt != m_pendingInserts.end()) {
-                    pendIt->second.attlist.push_back(a);
-                    if (pendIt->second.attlist.size() >= pendIt->second.attribHandles.size()) {
-                        intfa.addInsert(pendIt->second);
-                        m_pendingInserts.erase(pendIt);
-                    }
-                } else {
-                    m_orphanAttribs[ownerH].push_back(a);
-                }
+                // ATTDEF belongs to its BLOCK definition, not to an INSERT's
+                // trailing ATTRIB sequence. Routing it through the latter
+                // turns valid block text into an orphan and drops it at EOF.
+                intfa.addAttDef(*a);
             } else {
                 DRW_DBG("[attdef parse failed, handle "); DRW_DBG(obj.handle); DRW_DBG("]\n");
             }
@@ -1450,13 +1451,13 @@ bool dwgReader::readDwgEntity(dwgBuffer *dbuf, objHandle& obj, DRW_Interface& in
         case dwgType::ARC: {
             DRW_Arc e;
             if (entryParse(e, buff, bs, ret)) {
-                intfa.addArc(e);
+                emitWithExtrusion(e, intfa, &DRW_Interface::addArc);
             }
             break; }
         case dwgType::CIRCLE: {
             DRW_Circle e;
             if (entryParse(e, buff, bs, ret)) {
-                intfa.addCircle(e);
+                emitWithExtrusion(e, intfa, &DRW_Interface::addCircle);
             }
             break; }
         case dwgType::LINE: {
@@ -1529,13 +1530,13 @@ bool dwgReader::readDwgEntity(dwgBuffer *dbuf, objHandle& obj, DRW_Interface& in
         case dwgType::SOLID: {
             DRW_Solid e;
             if (entryParse(e, buff, bs, ret)) {
-                intfa.addSolid(e);
+                emitWithExtrusion(e, intfa, &DRW_Interface::addSolid);
             }
             break; }
         case dwgType::TRACE: {
             DRW_Trace e;
             if (entryParse(e, buff, bs, ret)) {
-                intfa.addTrace(e);
+                emitWithExtrusion(e, intfa, &DRW_Interface::addTrace);
             }
             break; }
         case dwgType::SHAPE: {
@@ -1568,7 +1569,7 @@ bool dwgReader::readDwgEntity(dwgBuffer *dbuf, objHandle& obj, DRW_Interface& in
         case dwgType::ELLIPSE: {
             DRW_Ellipse e;
             if (entryParse(e, buff, bs, ret)) {
-                intfa.addEllipse(e);
+                emitWithExtrusion(e, intfa, &DRW_Interface::addEllipse);
             }
             break; }
         case dwgType::SPLINE: {
@@ -1662,7 +1663,7 @@ bool dwgReader::readDwgEntity(dwgBuffer *dbuf, objHandle& obj, DRW_Interface& in
         case dwgType::LWPOLYLINE: {
             DRW_LWPolyline e;
             if (entryParse(e, buff, bs, ret)) {
-                intfa.addLWPolyline(e);
+                emitWithExtrusion(e, intfa, &DRW_Interface::addLWPolyline);
             }
             break; }
         case dwgType::HATCH: {
@@ -1885,32 +1886,11 @@ bool dwgReader::readDwgEntity(dwgBuffer *dbuf, objHandle& obj, DRW_Interface& in
                         intfa.addUnsupportedObject(makeRawEntity(oType, cit->second));
                         break;
                     }
-                    if (rn == "SURFACE" || rn == "EXTRUDEDSURFACE" || rn == "REVOLVEDSURFACE"
-                        || rn == "LOFTEDSURFACE" || rn == "SWEPTSURFACE" || rn == "PLANESURFACE"
-                        || cn == "AcDbSurface" || cn == "AcDbExtrudedSurface"
-                        || cn == "AcDbRevolvedSurface" || cn == "AcDbLoftedSurface"
-                        || cn == "AcDbSweptSurface" || cn == "AcDbPlaneSurface"
-                        || cn == "AcDbNurbSurface") {
-                        // AcDbSurface family ⊂ AcDbModelerGeometry: reuse the ACIS
-                        // path used for 3DSOLID/REGION/BODY (cases 37-39). The
-                        // surface-specific trailing fields (u/v isolines, sweep/loft
-                        // options) are not modelled, but the ACIS blob and the
-                        // history handle live in the common modeler prologue, and
-                        // the raw carrier preserves the full object for round-trip.
-                        // Tagged E3DSOLID so parseDwg reads the modeler history
-                        // handle that surfaces share via AcDbModelerGeometry.
-                        DRW_ModelerGeometry e(DRW::E3DSOLID);
-                        if (entryParse(e, buff, bs, ret)) {
-                            e.m_objectSize = static_cast<std::uint32_t>(size);
-                            e.m_rawBytes = tmpByteStr;
-                            intfa.addModelerGeometry(e);
-                        }
-                        // Always emit the lossless raw carrier (even on parse
-                        // failure) so the surface round-trips; break to skip the
-                        // generic skipped-custom-class fall-through.
-                        intfa.addUnsupportedObject(makeRawEntity(oType, cit->second));
-                        break;
-                    }
+                    // NOTE: the AcDbSurface family (SURFACE / EXTRUDED / REVOLVED /
+                    // LOFTED / SWEPT / PLANE / NURB) is dispatched by the typed
+                    // DRW_Surface arms above (intfa.addSurface); a bare AcDbSurface
+                    // with no concrete subtype falls through to the generic
+                    // custom-class handler (raw round-trip + proxy-graphics decode).
                     if (rn == "PDFUNDERLAY" || rn == "DGNUNDERLAY" || rn == "DWFUNDERLAY"
                         || cn == "AcDbPdfReference" || cn == "AcDbDgnReference"
                         || cn == "AcDbDwfReference") {
@@ -2068,6 +2048,7 @@ bool dwgReader::readDwgObject(dwgBuffer *dbuf, objHandle& obj, DRW_Interface& in
         std::int16_t oType = obj.type;
         auto makeRawObject = [&](int rawType, const DRW_Class *cls = nullptr) {
             DRW_UnsupportedObject raw;
+            raw.m_version = version;
             raw.m_objectType = rawType;
             raw.m_handle = obj.handle;
             raw.m_bodyBitSize = bs;

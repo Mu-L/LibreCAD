@@ -159,18 +159,18 @@ public:
     void removeLayer(RS_Layer* layer);
     void editLayer(RS_Layer* layer, const RS_Layer& source) {m_layerList.edit(layer, source);}
     RS_Layer* findLayer(const QString& name) {return m_layerList.find(name);}
-    void toggleLayer(const QString& name) {m_layerList.toggle(name);validateSelection();}
-    void toggleLayer(RS_Layer* layer) {m_layerList.toggle(layer); validateSelection();}
+    void toggleLayer(const QString& name);
+    void toggleLayer(RS_Layer* layer);
     void toggleLayerLock(RS_Layer* layer) {m_layerList.toggleLock(layer); validateSelection();}
     void toggleLayerPrint(RS_Layer* layer) {m_layerList.togglePrint(layer);}
     void toggleLayerConstruction(RS_Layer* layer) {m_layerList.toggleConstruction(layer);}
-    void freezeAllLayers(const bool freeze) {m_layerList.freezeAll(freeze);validateSelection();}
+    void freezeAllLayers(bool freeze);
     void lockAllLayers(const bool lock) {m_layerList.lockAll(lock);validateSelection();}
     void toggleLockLayers(const QList<RS_Layer*>& layers){m_layerList.toggleLockMulti(layers);validateSelection();}
     void togglePrintLayers(const QList<RS_Layer*>& layers){m_layerList.togglePrintMulti(layers);validateSelection();}
     void toggleConstructionLayers(const QList<RS_Layer*>& layers){m_layerList.toggleConstructionMulti(layers);validateSelection();}
-    void toggleFreezeLayers(const QList<RS_Layer*>& layers){m_layerList.toggleFreezeMulti(layers);validateSelection();}
-    void setFreezeLayers(const QList<RS_Layer*>& layersEnable, const QList<RS_Layer*>& layersDisable){m_layerList.setFreezeMulti(layersEnable, layersDisable);validateSelection();}
+    void toggleFreezeLayers(const QList<RS_Layer*>& layers);
+    void setFreezeLayers(const QList<RS_Layer*>& layersEnable, const QList<RS_Layer*>& layersDisable);
     void setLockLayers(const QList<RS_Layer*>& layersToUnlock, const QList<RS_Layer*>& layersToLock){m_layerList.setLockMulti(layersToUnlock, layersToLock);validateSelection();}
     void setPrintLayers(const QList<RS_Layer*>& layersNoPrint, const QList<RS_Layer*>& layersPrint){m_layerList.setPrintMulti(layersNoPrint, layersPrint);validateSelection();}
     void setConstructionLayers(const QList<RS_Layer*>& layersNoConstruction, const QList<RS_Layer*>& layersConstruction){m_layerList.setConstructionMulti(layersNoConstruction, layersConstruction);validateSelection();}
@@ -192,9 +192,10 @@ public:
     void removeBlock(RS_Block* block) {m_blockList.remove(block);}
     RS_Block* findBlock(const QString& name) {return m_blockList.find(name);}
     QString newBlockName(const QString& suggestion = {}) {return m_blockList.newName(suggestion);}
-    void toggleBlock(const QString& name) {m_blockList.toggle(name);}
-    void toggleBlock(RS_Block* block) {m_blockList.toggle(block);}
-    void freezeAllBlocks(const bool freeze) {m_blockList.freezeAll(freeze);}
+    void toggleBlock(const QString& name);
+    void toggleBlock(RS_Block* block);
+    void toggleBlocks(const QList<RS_Block*>& blocks);
+    void freezeAllBlocks(bool freeze);
     void addBlockListListener(RS_BlockListListener* listener) {m_blockList.addListener(listener);}
     void removeBlockListListener(RS_BlockListListener* listener) {m_blockList.removeListener(listener);}
 
@@ -272,6 +273,19 @@ public:
     void setModified(bool m) override;
     void markSaved(const QDateTime &lastSaveTime);
 
+    /**
+     * Import-time geometry repair (prepare / far re-base) mutates coordinates.
+     * Set during fileImport when a repair switch is on and a mutation ran;
+     * load path should mark the document modified after markSaved so Save
+     * does not silently rewrite the user's file without notice.
+     */
+    void setImportGeometryMutated(bool mutated) { m_importGeometryMutated = mutated; }
+    bool takeImportGeometryMutated() {
+        const bool v = m_importGeometryMutated;
+        m_importGeometryMutated = false;
+        return v;
+    }
+
     QDateTime getLastSaveTime(){return m_lastSaveTime;}
     void setLastSaveTime(const QDateTime &time) { m_lastSaveTime = time;}
 
@@ -332,6 +346,11 @@ public:
 protected:
     void fireGraphicModified(bool modified) const;
 private:
+    /** Rebuild INSERT visibility and refresh cached drawing state after layer changes. */
+    void refreshLayerVisibility();
+    /** Rebuild derived INSERT children after block visibility changes. */
+    void refreshBlockVisibility();
+
     QDateTime m_lastSaveTime;
     QString m_currentFileName; //keep a copy of filename for the modifiedTime
 
@@ -365,6 +384,9 @@ private:
     QString m_autosaveFilename;
 
     bool m_anglesCounterClockWize;
+
+    /** True when import repairs rewrote block defs and/or model placement. */
+    bool m_importGeometryMutated = false;
 
     std::unique_ptr<LC_PlotSettings> m_plotSettings;
 };

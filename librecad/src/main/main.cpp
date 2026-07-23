@@ -321,6 +321,14 @@ int main(int argc, char** argv) {
     QGuiApplication::setHighDpiScaleFactorRoundingPolicy(Qt::HighDpiScaleFactorRoundingPolicy::RoundPreferFloor);
 #endif
 
+#ifdef Q_OS_LINUX
+    const QByteArray xcursorPathEnv = qgetenv("XCURSOR_PATH");
+    if (xcursorPathEnv.isEmpty()) {
+        const QByteArray defaultPaths = "/usr/share/icons:/usr/local/share/icons:/usr/share/pixmaps";
+        qputenv("XCURSOR_PATH", defaultPaths);
+    }
+#endif
+
 
     const auto versionStr = XSTR(LC_VERSION);
 
@@ -333,7 +341,7 @@ int main(int argc, char** argv) {
         QStringLiteral("LibreCAD-%1").arg(RS_Settings::LC_SETTINGS_SCHEMA_MAJOR));
     QCoreApplication::setApplicationVersion(versionStr);
 
-    
+
 
     // fixme - sand - or just altenative simpler scheme mya be used...
     /*
@@ -452,25 +460,10 @@ int main(int argc, char** argv) {
 
     QSettings settings; // fixme - direct invocation of settings
     settings.beginGroup("Defaults");
-#ifdef __APPLE__
-    // One-time migration: older builds auto-wrote UseQtFileOpenDialog=0 on macOS
-    // at first launch, pinning existing users to the native (Cocoa) panel, which
-    // can fail to open on unsigned / locally-built bundles (silently aborting
-    // Open/Save/Export). Reset that stale default to the reliable Qt dialog once;
-    // afterwards the user's own choice (Options > General) is preserved.
-    if (!settings.value("UseQtFileOpenDialogMacMigrated", false).toBool()) {
-        settings.setValue("UseQtFileOpenDialog", 1);
-        settings.setValue("UseQtFileOpenDialogMacMigrated", true);
-    }
-#endif
     if( !settings.contains("UseQtFileOpenDialog")) {
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__)
         // Default to the Qt-drawn file dialog rather than the native one:
-        // on Linux the native dialog has case-insensitive-filter issues (#791);
-        // on macOS the native (Cocoa) panel can fail to open on unsigned /
-        // locally-built bundles -- it returns immediately with no panel shown,
-        // silently aborting Open/Save/Export. Users can opt back into the native
-        // dialog via Options > General (takes effect on restart).
+        // on Linux the native dialog has case-insensitive-filter issues (#791).
         settings.setValue("UseQtFileOpenDialog", QVariant(1));
 #else
         settings.setValue("UseQtFileOpenDialog", QVariant(0));

@@ -13,6 +13,7 @@
 ******************************************************************************/
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -1758,9 +1759,17 @@ bool DRW_Entity::encodeDwgCommon(DRW::Version version, dwgBufferW *buf,
 
     const bool hasOwner = parentHandle != DRW::NoHandle;
 
-    // entmode: 0 = owner handle follows in the handle stream; 2 = modelspace,
-    // no owner-handle in stream.
-    buf->put2Bits(hasOwner ? 0 : 2);
+    // entmode BB (ODA §20.4.1 / Open Design FE):
+    //   0 = owner handle follows in the handle stream
+    //   1 = paperspace entity without owner-relative handle
+    //   2 = modelspace entity without owner-relative handle
+    // Prefer owner when present; otherwise honor DRW_Entity::space.
+    std::uint8_t entmode = 2;
+    if (hasOwner)
+        entmode = 0;
+    else if (space == DRW::PaperSpace)
+        entmode = 1;
+    buf->put2Bits(entmode);
 
     // numReactors (BL per spec §20.4.1). 2a.2: emit the real count; empty
     // reactorHandles → 0 → byte-identical to legacy.
@@ -1798,9 +1807,35 @@ bool DRW_Entity::encodeDwgCommon(DRW::Version version, dwgBufferW *buf,
     // ltypeScale BD.
     buf->putBitDouble(ltypeScale);
 
-    // ltFlags BB (0 = BYLAYER), plotFlags BB (0 = BYLAYER).
-    buf->put2Bits(0);
-    buf->put2Bits(0);
+    // ltFlags BB: 0=BYLAYER, 1=BYBLOCK, 2=CONTINUOUS, 3=lTypeH present.
+    // Prefer an already-set ltFlags; otherwise derive from lineType / lTypeH.
+    {
+        auto upper = [](std::string s) {
+            for (char& c : s)
+                c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            return s;
+        };
+        std::uint8_t flags = ltFlags;
+        if (flags > 3)
+            flags = 0;
+        if (flags == 0 && lTypeH.ref != 0)
+            flags = 3;
+        if (flags == 0) {
+            const std::string lt = upper(lineType);
+            if (lt.empty() || lt == "BYLAYER")
+                flags = 0;
+            else if (lt == "BYBLOCK")
+                flags = 1;
+            else if (lt == "CONTINUOUS")
+                flags = 2;
+            else
+                flags = 3;  // named linetype — handle required
+        }
+        ltFlags = flags;
+    }
+    buf->put2Bits(ltFlags);
+    // plotFlags BB: keep BYLAYER (0) this pass unless already set to 3.
+    buf->put2Bits(plotFlags & 0x3);
 
     // R2010 (AC1024): materialFlag BB + shadowFlag RC (version > AC1018).
     if (version > DRW::AC1018) {
@@ -1892,10 +1927,20 @@ bool DRW_Entity::encodeDwgEntHandle(DRW::Version version, dwgBufferW *buf,
     }
     hb->putHandle(lH);
 
-    // ltFlags=0 → no separate lTypeH (BYLAYER).
-    // plotFlags=0 → no plotStyleH (BYLAYER).
-    // materialFlag=0 → no materialH (for AC1024).
-    // visualStyle flags=0 → no visualStyleH (for AC1024).
+    // ltFlags=3 → lTypeH (hard pointer, code 5) present; else omit.
+    if (ltFlags == 3) {
+        dwgHandle ltH;
+        ltH.code = lTypeH.ref == 0 ? 0 : 5;
+        ltH.ref = lTypeH.ref;
+        ltH.size = 0;
+        if (ltH.ref != 0) {
+            std::uint32_t t = ltH.ref;
+            while (t != 0) { t >>= 8; ++ltH.size; }
+        }
+        hb->putHandle(ltH);
+    }
+    // plotFlags remain 0 this pass → no plot-style handle.
+    // materialFlag / visualStyle flags remain 0 → no extra handles.
 
     return true;
 }
@@ -2245,7 +2290,7 @@ bool DRW_Insert::encodeDwg(DRW::Version version, dwgBufferW *buf, std::uint32_t 
     // 2b.6: emit MINSERT (oType 8) when a column/row grid is present;
     // otherwise a plain INSERT (oType 7). The reader keys the grid block off
     // oType==8 (parseDwg :3189).
-    oType = (colcount > 1 || rowcount > 1) ? 8 : 7;
+    oType = isMInsert() ? 8 : 7;
     if (!encodeDwgCommon(version, buf)) return false;
 
     // INSERT body — mirror of DRW_Insert::parseDwg for R2000.
@@ -2705,6 +2750,7 @@ bool DRW_Ellipse::parseCode(int code, const std::unique_ptr<dxfReader>& reader){
 void DRW_Ellipse::applyExtrusion(){
     if (haveExtrusion) {
         calculateAxis(extPoint);
+        extrudePoint(extPoint, &basePoint);
         extrudePoint(extPoint, &secPoint);
         double intialparam = staparam;
         if (extPoint.z < 0.){
@@ -5050,6 +5096,7 @@ bool DRW_ArcAlignedText::parseDwg(DRW::Version version, dwgBuffer *buf, std::uin
 DRW_Attrib::~DRW_Attrib() = default;
 DRW_Attrib::DRW_Attrib(const DRW_Attrib& o)
     : DRW_Text(o), tag(o.tag), attribFlags(o.attribFlags),
+      m_fieldLength(o.m_fieldLength),
       lockPosition(o.lockPosition), attVersion(o.attVersion),
       m_attributeType(o.m_attributeType),
       mtext(o.mtext ? std::make_unique<DRW_MText>(*o.mtext) : nullptr) {}
@@ -5058,6 +5105,7 @@ DRW_Attrib& DRW_Attrib::operator=(const DRW_Attrib& o) {
         DRW_Text::operator=(o);
         tag = o.tag;
         attribFlags = o.attribFlags;
+        m_fieldLength = o.m_fieldLength;
         lockPosition = o.lockPosition;
         attVersion = o.attVersion;
         m_attributeType = o.m_attributeType;
@@ -7347,8 +7395,14 @@ bool DRW_Image::parseCode(int code, const std::unique_ptr<dxfReader>& reader){
     case 23:
         sizev = reader->getDouble();
         break;
+    case 70:
+        m_displayProps = reader->getInt32();
+        break;
     case 340:
         ref = reader->getHandleString();
+        break;
+    case 360:
+        m_imageDefReactorHandle = reader->getHandleString();
         break;
     case 280:
         clip = reader->getInt32();
@@ -7366,20 +7420,32 @@ bool DRW_Image::parseCode(int code, const std::unique_ptr<dxfReader>& reader){
         m_clipBoundaryType = reader->getInt32();
         break;
     case 91:
-        // WIPEOUT: number of polygon vertices.  We don't pre-size — the count
-        // is informational and the 14/24 pairs follow in order.
+        // The declared count is a structural invariant: reject negative or
+        // implausibly large values before reserve() can allocate unboundedly.
+        {
+        constexpr std::int32_t kMaxClipVertices = 100000;
+        const std::int32_t count = reader->getInt32();
+        if (count < 0 || count > kMaxClipVertices)
+            return false;
         clipPath.clear();
-        clipPath.reserve(static_cast<size_t>(reader->getInt32()));
+        clipPath.reserve(static_cast<size_t>(count));
+        m_declaredClipVertexCount = count;
+        m_clipPathHasOpenVertex = false;
+        }
         break;
     case 14:
         // WIPEOUT polygon vertex x — start a new vertex.  Group 24 (y) follows.
+        if (m_clipPathHasOpenVertex)
+            return false;
         clipPath.emplace_back(reader->getDouble(), 0.0);
+        m_clipPathHasOpenVertex = true;
         break;
     case 24:
         // WIPEOUT polygon vertex y — complete the most recently started vertex.
-        if (!clipPath.empty()) {
-            clipPath.back().y = reader->getDouble();
-        }
+        if (!m_clipPathHasOpenVertex || clipPath.empty())
+            return false;
+        clipPath.back().y = reader->getDouble();
+        m_clipPathHasOpenVertex = false;
         break;
     case 290:
         // R2010+ Clip mode (IMAGE/WIPEOUT, ODA spec §20.4.80):
@@ -7391,6 +7457,24 @@ bool DRW_Image::parseCode(int code, const std::unique_ptr<dxfReader>& reader){
     }
 
     return true;
+}
+
+bool DRW_Image::hasValidClipBoundary() const {
+    if (m_clipPathHasOpenVertex
+        || (m_declaredClipVertexCount >= 0
+            && static_cast<std::size_t>(m_declaredClipVertexCount) != clipPath.size())) {
+        return false;
+    }
+    switch (m_clipBoundaryType) {
+    case 0:
+        return clipPath.empty();
+    case 1:
+        return clipPath.size() == 2;
+    case 2:
+        return clipPath.size() >= 3;
+    default:
+        return false;
+    }
 }
 
 bool DRW_Image::parseDwg(DRW::Version version, dwgBuffer *buf, std::uint32_t bs){
@@ -7429,14 +7513,13 @@ bool DRW_Image::parseDwg(DRW::Version version, dwgBuffer *buf, std::uint32_t bs)
     if (m_clipBoundaryType == 0) {
         // No clip boundary payload.
     } else if (m_clipBoundaryType == 1){
-        // rectangular clip: lower-left and upper-right corners; expand to a
-        // 4-vertex polygon so downstream consumers can treat both kinds uniformly.
+        // Rectangles are encoded as exactly two opposite corners. Keep that
+        // canonical payload intact; rendering expands it independently.
         DRW_Coord ll = buf->get2RawDouble();
         DRW_Coord ur = buf->get2RawDouble();
         clipPath.push_back(ll);
-        clipPath.push_back(DRW_Coord(ur.x, ll.y, 0.0));
         clipPath.push_back(ur);
-        clipPath.push_back(DRW_Coord(ll.x, ur.y, 0.0));
+        m_declaredClipVertexCount = 2;
     } else if (m_clipBoundaryType == 2) {
         std::int32_t numVerts = buf->getBitLong();
         if (numVerts < 0 || numVerts > 100000)
@@ -7444,6 +7527,7 @@ bool DRW_Image::parseDwg(DRW::Version version, dwgBuffer *buf, std::uint32_t bs)
         clipPath.reserve(numVerts);
         for (int i= 0; i< numVerts;++i)
             clipPath.push_back(buf->get2RawDouble());
+        m_declaredClipVertexCount = numVerts;
     } else {
         DRW_DBG("unsupported image clip type: "); DRW_DBG(m_clipBoundaryType); DRW_DBG("\n");
         return false;
@@ -7475,6 +7559,20 @@ bool DRW_Image::parseDwg(DRW::Version version, dwgBuffer *buf, std::uint32_t bs)
 bool DRW_Image::encodeDwg(DRW::Version version, dwgBufferW *buf, std::uint32_t bs,
                           dwgBufferW *strBuf, dwgBufferW *handleBuf) {
     (void)bs; (void)strBuf;
+    constexpr std::size_t kMaxClipVerts = 100000u;
+    if (clipPath.size() > kMaxClipVerts) {
+        DRW_DBG("IMAGE clip vertices exceed DWG limit\n");
+        return false;
+    }
+    // Callers sometimes populate clipPath without setting m_clipBoundaryType
+    // (DXF import historically stored only the vertices). Infer a coherent type
+    // so encode does not reject a well-formed polygon/rectangle path.
+    if (m_clipBoundaryType == 0 && !clipPath.empty()) {
+        if (clipPath.size() == 2)
+            m_clipBoundaryType = 1;
+        else if (clipPath.size() >= 3)
+            m_clipBoundaryType = 2;
+    }
     oType = 101;  // IMAGE class id — see dwgreader.cpp case 101
     if (!encodeDwgCommon(version, buf)) return false;
 
@@ -7492,25 +7590,20 @@ bool DRW_Image::encodeDwg(DRW::Version version, dwgBufferW *buf, std::uint32_t b
     if (version > DRW::AC1021) {  // 2010+ clip mode
         buf->putBit(clipMode ? 1 : 0);
     }
-    if (clipPath.empty()) {
+    if (!hasValidClipBoundary()) {
+        DRW_DBG("IMAGE has invalid clip boundary\n");
+        return false;
+    }
+    if (m_clipBoundaryType == 0) {
         buf->putBitShort(0);  // clip_boundary_type 0 = none
+    } else if (m_clipBoundaryType == 1) {
+        buf->putBitShort(1);
+        buf->put2RawDouble(clipPath[0]);
+        buf->put2RawDouble(clipPath[1]);
     } else {
-        // Always emit polygon type 2 — reader expands a stored rect (type 1)
-        // into a 4-vertex polygon, so re-emit it as a polygon, never type 1.
         buf->putBitShort(2);
-        // Clamp to the count parseDwg accepts (it rejects clipType==2 with
-        // numVerts > 100000, dropping the entity on re-read). The DXF parseCode
-        // path (code 91) has no such bound, so a DXF-sourced clip can exceed it;
-        // cap on encode and emit exactly that many vertices. Compute the min on
-        // size_t (NOT a pre-cast int32) so an enormous size cannot wrap negative.
-        constexpr std::size_t kMaxClipVerts = 100000u;
-        const std::size_t emitVerts = std::min(clipPath.size(), kMaxClipVerts);
-        if (clipPath.size() > kMaxClipVerts) {
-            DRW_DBG("IMAGE clip vertices truncated to 100000 (was ");
-            DRW_DBG(static_cast<int>(clipPath.size())); DRW_DBG(")\n");
-        }
-        buf->putBitLong(static_cast<std::int32_t>(emitVerts));
-        for (std::size_t i = 0; i < emitVerts; ++i)
+        buf->putBitLong(static_cast<std::int32_t>(clipPath.size()));
+        for (std::size_t i = 0; i < clipPath.size(); ++i)
             buf->put2RawDouble(clipPath[i]);
     }
 
@@ -7536,14 +7629,27 @@ bool DRW_Wipeout::parseCode(int code, const std::unique_ptr<dxfReader>& reader) 
     return DRW_Image::parseCode(code, reader);
 }
 
+bool DRW_Wipeout::hasValidBoundary() const {
+    return m_clipBoundaryType != 0 && hasValidClipBoundary();
+}
+
 bool DRW_Wipeout::parseDwg(DRW::Version version, dwgBuffer *buf, std::uint32_t bs) {
-    return DRW_Image::parseDwg(version, buf, bs);
+    return DRW_Image::parseDwg(version, buf, bs) && hasValidBoundary();
 }
 
 bool DRW_Wipeout::encodeDwg(DRW::Version version, dwgBufferW *buf, std::uint32_t bs,
                              dwgBufferW *strBuf, dwgBufferW *handleBuf) {
     (void)bs; (void)strBuf;
-    oType = 1109;
+    constexpr std::size_t kMaxClipVerts = 100000u;
+    if (clipPath.size() > kMaxClipVerts) {
+        DRW_DBG("WIPEOUT clip vertices exceed DWG limit\n");
+        return false;
+    }
+    if (!hasValidBoundary()) {
+        DRW_DBG("WIPEOUT has invalid clip boundary\n");
+        return false;
+    }
+    oType = kDwgClassNum;
     if (!encodeDwgCommon(version, buf)) return false;
 
     buf->putBitLong(0);
@@ -7560,18 +7666,14 @@ bool DRW_Wipeout::encodeDwg(DRW::Version version, dwgBufferW *buf, std::uint32_t
     if (version > DRW::AC1021) {
         buf->putBit(clipMode ? 1 : 0);
     }
-    if (clipPath.empty()) {
-        buf->putBitShort(0);
+    if (m_clipBoundaryType == 1) {
+        buf->putBitShort(1);
+        buf->put2RawDouble(clipPath[0]);
+        buf->put2RawDouble(clipPath[1]);
     } else {
         buf->putBitShort(2);
-        constexpr std::size_t kMaxClipVerts = 100000u;
-        const std::size_t emitVerts = std::min(clipPath.size(), kMaxClipVerts);
-        if (clipPath.size() > kMaxClipVerts) {
-            DRW_DBG("WIPEOUT clip vertices truncated to 100000 (was ");
-            DRW_DBG(static_cast<int>(clipPath.size())); DRW_DBG(")\n");
-        }
-        buf->putBitLong(static_cast<std::int32_t>(emitVerts));
-        for (std::size_t i = 0; i < emitVerts; ++i)
+        buf->putBitLong(static_cast<std::int32_t>(clipPath.size()));
+        for (std::size_t i = 0; i < clipPath.size(); ++i)
             buf->put2RawDouble(clipPath[i]);
     }
 
@@ -7650,9 +7752,10 @@ bool DRW_PointCloud::parseDwg(DRW::Version version, dwgBuffer *buf, std::uint32_
 
 bool DRW_PointCloud::encodeDwg(DRW::Version version, dwgBufferW *buf, std::uint32_t bs,
                                 dwgBufferW *strBuf, dwgBufferW *handleBuf) {
-    (void)bs; (void)strBuf; (void)handleBuf;
-    oType = 1157;
-    return encodeDwgCommon(version, buf);
+    // Typed POINTCLOUD body encode is not implemented. Refuse rather than
+    // emit a header-only stub that third-party readers reject.
+    (void)version; (void)buf; (void)bs; (void)strBuf; (void)handleBuf;
+    return false;
 }
 
 bool DRW_PointCloudEx::parseCode(int code, const std::unique_ptr<dxfReader>& reader) {
@@ -7710,9 +7813,8 @@ bool DRW_PointCloudEx::parseDwg(DRW::Version version, dwgBuffer *buf, std::uint3
 
 bool DRW_PointCloudEx::encodeDwg(DRW::Version version, dwgBufferW *buf, std::uint32_t bs,
                                   dwgBufferW *strBuf, dwgBufferW *handleBuf) {
-    (void)bs; (void)strBuf; (void)handleBuf;
-    oType = 1158;
-    return encodeDwgCommon(version, buf);
+    (void)version; (void)buf; (void)bs; (void)strBuf; (void)handleBuf;
+    return false;
 }
 
 bool DRW_Surface::parseCode(int code, const std::unique_ptr<dxfReader>& reader) {
@@ -7746,8 +7848,9 @@ bool DRW_Surface::parseDwg(DRW::Version version, dwgBuffer *buf, std::uint32_t b
 
 bool DRW_Surface::encodeDwg(DRW::Version version, dwgBufferW *buf, std::uint32_t bs,
                              dwgBufferW *strBuf, dwgBufferW *handleBuf) {
-    (void)bs; (void)strBuf; (void)handleBuf;
-    return encodeDwgCommon(version, buf);
+    // Surface/ACIS body encode is not implemented as a full typed path.
+    (void)version; (void)buf; (void)bs; (void)strBuf; (void)handleBuf;
+    return false;
 }
 
 bool DRW_Dimension::parseCode(int code, const std::unique_ptr<dxfReader>& reader){

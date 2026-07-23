@@ -78,21 +78,6 @@ bool RS_FileIO::fileImport(RS_Graphic& graphic, const QString& file,
         if (filter) {
 #ifdef DWGSUPPORT
             const bool isDwg{file.endsWith(".dwg", Qt::CaseInsensitive)};
-            if (isDwg) {
-                QApplication::restoreOverrideCursor(); // disable WaitCursor for massagebox
-
-                // use QStringList to avoid "\n" in translation strings
-                const QStringList info{
-                    QObject::tr("DWG support is not complete!"),
-                    "",
-                    QObject::tr("If this file fails to open try an older DWG format"),
-                    QObject::tr("or try to find a converter to make it a DXF file.")
-                };
-
-                QMessageBox::information(qApp->activeWindow(), QObject::tr("Information"), info.join("\n"), QMessageBox::Ok,
-                                         QMessageBox::NoButton);
-                QApplication::setOverrideCursor(QCursor(Qt::WaitCursor));
-            }
 #endif
             const bool bImported{filter->fileImport(graphic, file, t)};
             if (!bImported) {
@@ -166,7 +151,9 @@ RS2::FormatType RS_FileIO::detectFormat(const QString & file, bool forRead){
         {"lff", RS2::FormatLFF},
         {"shp", RS2::FormatSHP}
     };
+#ifdef DWGSUPPORT
     list["dwg"] = RS2::FormatDWG;
+#endif
 
     const QString extension = QFileInfo(file).suffix().toLower();
     RS2::FormatType type = (list.find(extension) != list.end()) ? list[extension] : RS2::FormatUnknown;

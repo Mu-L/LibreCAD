@@ -54,6 +54,7 @@ class RS_Ellipse;
 class RS_Hatch;
 class RS_Image;
 class RS_Insert;
+class RS_Layer;
 class RS_Leader;
 class RS_Line;
 class RS_MText;
@@ -70,6 +71,9 @@ struct DRW_AcisBrep;
 // the header-var regression suite access to the private m_graphic/
 // m_currentContainer so it can exercise addHeader against a real RS_Graphic.
 class RsFilterDxfRwHeaderTestAccess;
+// test-only friend; defined in tests/family_exposure_tests.cpp. Grants access
+// to m_graphic for cross-read filter exposure / Navisworks metadata tests.
+class RsFilterDxfRwExposureTestAccess;
 
 /**
  * This format filter class can import and export DXF files.
@@ -79,6 +83,7 @@ class RsFilterDxfRwHeaderTestAccess;
  */
 class RS_FilterDXFRW : public RS_FilterInterface, DRW_Interface {
     friend class RsFilterDxfRwHeaderTestAccess;
+    friend class RsFilterDxfRwExposureTestAccess;
 public:
     RS_FilterDXFRW();
     ~RS_FilterDXFRW() override;
@@ -149,6 +154,7 @@ public:
     void addShape(const DRW_Shape &data) override;
     void addOle2Frame(const DRW_Ole2Frame &data) override;
     void addText(const DRW_Text& data) override;
+    void addAttDef(const DRW_Attdef& data) override;
     void addPolyline(const DRW_Polyline& data) override;
     void addSpline(const DRW_Spline* data) override;
     void addHelix(const DRW_Helix* data) override;
@@ -215,11 +221,26 @@ public:
     void addCellStyleMap(const DRW_CellStyleMap &data) override;
     void addUnsupportedObject(const DRW_UnsupportedObject &data) override;
     void addRawDwgSection(const DRW_RawDwgSection &data) override;
+    void addDataStorage(const DRW_DataStorageSection &data) override;
     void addRawDxfObject(const DRW_RawDxfObject &data) override;
     void addRawDxfEntity(const DRW_RawDxfObject &data) override;
     void addDxfClass(const DRW_Class &data) override;
     void addAcDbPlaceholder(const DRW_AcDbPlaceholder &data) override;
     void addSun(const DRW_Sun &data) override;
+    // Cross-read parity: metadata-only exposure (PR-4a/4c) — no document geometry
+    void addPointCloud(const DRW_PointCloud *data) override;
+    void addPointCloudEx(const DRW_PointCloudEx *data) override;
+    void addPointCloudDef(const DRW_PointCloudDef &data) override;
+    void addBackground(const DRW_Background &data) override;
+    void addMaterial(const DRW_Material &data) override;
+    void addRenderSettings(const DRW_RenderSettings &data) override;
+    void addSunStudy(const DRW_SunStudy &data) override;
+    void addDbColor(const DRW_DbColor &data) override;
+    void addDimensionAssociation(const DRW_DimensionAssociation &data) override;
+    void addEvaluationGraph(const DRW_EvaluationGraph &data) override;
+    void addSection(const DRW_Section &data) override;
+    void addSectionObject(const DRW_SectionObject &data) override;
+    void addMPolygon(const DRW_MPolygon *data) override;
     void addDictionary(const DRW_Dictionary &data) override;
     void addXRecord(const DRW_XRecord &data) override;
     void addLayout(const DRW_Layout &data) override;
@@ -381,6 +402,8 @@ protected:
     bool shouldGenerateExtEntityData(const RS_Dimension* entity);
     QString toHexStr(int n);
     void addDimStyleOverrideToExtendedData(LC_ExtEntityData* extEntityData, LC_DimStyle* styleOverride);
+    RS_Layer *importLayerForEntity(const QString &layName,
+                                   const std::string &rawLayerName);
 
 private:
     void prepareBlocks();
@@ -514,16 +537,30 @@ private:
     dwgRW *m_dwgW {nullptr};
     dwgRW::WriteSkipCounters m_lastDwgWriteSkipCounters;
 #endif
+    // DRW_Interface write callbacks are void. Preserve callback failures until
+    // fileExport can return them to the caller instead of reporting success.
+    bool m_writeFailed {false};
     /** If saved version are 2004 or above can save color in RGB value. */
     bool m_exactColor = false;
     /** hash of block containers and handleBlock numbers to read dwg files */
     QHash<int, RS_EntityContainer*> m_blockHash;
+    /** Per-import layer cache keyed by NFC-normalized name. */
+    QHash<QString, RS_Layer *> m_importLayerCache;
+    /** Fast-path mirror of m_importLayerCache keyed by the RAW (pre-
+     *  normalization) name, checked first in importLayerForEntity() so a
+     *  repeated layer name (the common case: few distinct layers, many
+     *  entities) skips the NFC-normalization pass entirely on a hit. Falls
+     *  back to m_importLayerCache (which does normalize) on a miss, so this
+     *  is purely additive -- never the only source of truth for a name. */
+    QHash<QString, RS_Layer *> m_importLayerRawCache;
     /** Pointer to entity container to store possible orphan entities like paper space */
     RS_EntityContainer* m_dummyContainer = nullptr;
     void applyParsedDimStyleExtData(const LC_DimStyle* dimStyle, const QString& appName, const std::vector<DRW_Variant>& vector);
     LC_DimStyle* createDimStyle(const DRW_Dimstyle& s);
-    void addPolylineSegment(RS_Polyline& polyline, const RS_Vector& previousPosition, const RS_Vector& currentPosition, double bulge,
-                            const std::vector<std::shared_ptr<DRW_Variant>>& extData, bool isClosedSegment);
+    void addPolylineSegment(RS_Polyline& polyline, const RS_Vector& previousPosition,
+                            const RS_Vector& currentPosition, double segmentBulge,
+                            double nextBulge,
+                            const std::vector<std::shared_ptr<DRW_Variant>>& extData);
     /**
      * Handle degree-2 SPLINE with exactly 3 control points (rational quadratic conic).
      * @return true if a conic entity (hyperbola or parabola) was created and handled

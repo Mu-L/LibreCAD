@@ -85,6 +85,66 @@ namespace {
     }
 }
 
+void RS_Graphic::refreshBlockVisibility() {
+    updateInserts();
+    calculateBorders();
+    validateSelection();
+}
+
+void RS_Graphic::refreshLayerVisibility() {
+    // Expanded INSERT children flatten nested reference layers into their
+    // visibility flags. Rebuild them before deriving bounds or selection.
+    updateInserts();
+    calculateBorders();
+    validateSelection();
+}
+
+void RS_Graphic::toggleLayer(const QString& name) {
+    toggleLayer(m_layerList.find(name));
+}
+
+void RS_Graphic::toggleLayer(RS_Layer* layer) {
+    if (layer == nullptr) {
+        return;
+    }
+    m_layerList.toggle(layer);
+    refreshLayerVisibility();
+}
+
+void RS_Graphic::freezeAllLayers(const bool freeze) {
+    m_layerList.freezeAll(freeze);
+    refreshLayerVisibility();
+}
+
+void RS_Graphic::toggleFreezeLayers(const QList<RS_Layer*>& layers) {
+    m_layerList.toggleFreezeMulti(layers);
+    refreshLayerVisibility();
+}
+
+void RS_Graphic::setFreezeLayers(const QList<RS_Layer*>& layersEnable,
+                                 const QList<RS_Layer*>& layersDisable) {
+    m_layerList.setFreezeMulti(layersEnable, layersDisable);
+    refreshLayerVisibility();
+}
+
+void RS_Graphic::toggleBlock(const QString& name) {
+    toggleBlock(m_blockList.find(name));
+}
+
+void RS_Graphic::toggleBlock(RS_Block* block) {
+    toggleBlocks(QList<RS_Block*>{block});
+}
+
+void RS_Graphic::toggleBlocks(const QList<RS_Block*>& blocks) {
+    if (m_blockList.toggleMulti(blocks))
+        refreshBlockVisibility();
+}
+
+void RS_Graphic::freezeAllBlocks(const bool freeze) {
+    m_blockList.freezeAll(freeze);
+    refreshBlockVisibility();
+}
+
 /**
  * Default constructor.
  */
@@ -885,36 +945,34 @@ void RS_Graphic::setDefaultDimStyleName(const QString& name) {
 
 LC_DimStyle* RS_Graphic::getEffectiveDimStyle(const QString& styleName, const RS2::EntityType dimType,
                                               const LC_DimStyle* styleOverride) const {
-    const auto globalDimStyle = getResolvedDimStyle(styleName, dimType);
-    LC_DimStyle* resolvedDimStyle = nullptr;
+    LC_DimStyle* globalDimStyle = getResolvedDimStyle(styleName, dimType);
     if (styleOverride == nullptr) {
-        resolvedDimStyle = globalDimStyle;
+        return globalDimStyle;
     }
-    else {
-        // NOTE: If there is style override, the returned instance SHOULD BE DELETED by caller code!!!
-        // that's pretty ugly, yet avoid to eliminate additional copy operation for most cases, as
-        // it's expected that style override is less commonly used feature comparing to just setting
-        // existing styles to the dimension entity
-        const auto styleOverrideCopy = styleOverride->getCopy();
-        styleOverrideCopy->mergeWith(globalDimStyle, LC_DimStyle::ModificationAware::UNSET, LC_DimStyle::ModificationAware::UNSET);
-        resolvedDimStyle = styleOverrideCopy;
+    // NOTE: If there is style override, the returned instance SHOULD BE DELETED by caller code!!!
+    // that's pretty ugly, yet avoid to eliminate additional copy operation for most cases, as
+    // it's expected that style override is less commonly used feature comparing to just setting
+    // existing styles to the dimension entity
+    LC_DimStyle* styleOverrideCopy = styleOverride->getCopy();
+    if (globalDimStyle != nullptr) {
+        styleOverrideCopy->mergeWith(globalDimStyle, LC_DimStyle::ModificationAware::UNSET,
+                                     LC_DimStyle::ModificationAware::UNSET);
     }
-    return resolvedDimStyle;
+    return styleOverrideCopy;
 }
 
 LC_DimStyle* RS_Graphic::getEffectiveDimStyleForEdit(const QString& styleName, const RS2::EntityType dimType,
                                                      const LC_DimStyle* styleOverride) const {
-    const auto globalDimStyle = getResolvedDimStyle(styleName, dimType);
-    LC_DimStyle* resolvedDimStyle = nullptr;
+    LC_DimStyle* globalDimStyle = getResolvedDimStyle(styleName, dimType);
     if (styleOverride == nullptr) {
-        resolvedDimStyle = globalDimStyle->getCopy();
+        return globalDimStyle != nullptr ? globalDimStyle->getCopy() : nullptr;
     }
-    else {
-        const auto styleOverrideCopy = styleOverride->getCopy();
-        styleOverrideCopy->mergeWith(globalDimStyle, LC_DimStyle::ModificationAware::UNSET, LC_DimStyle::ModificationAware::UNSET);
-        resolvedDimStyle = styleOverrideCopy;
+    LC_DimStyle* styleOverrideCopy = styleOverride->getCopy();
+    if (globalDimStyle != nullptr) {
+        styleOverrideCopy->mergeWith(globalDimStyle, LC_DimStyle::ModificationAware::UNSET,
+                                     LC_DimStyle::ModificationAware::UNSET);
     }
-    return resolvedDimStyle;
+    return styleOverrideCopy;
 }
 
 LC_DimStyle* RS_Graphic::getResolvedDimStyle(const QString& dimStyleName, const RS2::EntityType dimType) const {

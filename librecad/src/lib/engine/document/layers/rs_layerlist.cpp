@@ -29,6 +29,8 @@
 
 #include<iostream>
 
+#include <QSet>
+
 #include "rs_debug.h"
 #include "rs_layer.h"
 #include "rs_layerlistlistener.h"
@@ -50,6 +52,7 @@ RS_LayerList::~RS_LayerList() {
  */
 void RS_LayerList::clear() {
     m_layers.clear();
+    m_layerSet.clear();
     setModified(true);
 }
 
@@ -134,6 +137,7 @@ void RS_LayerList::add(RS_Layer* layerToAdd) {
     RS_Layer* existingLayer = find(layerToAdd->getName());
     if (existingLayer == nullptr) {
         m_layers.append(layerToAdd);
+        m_layerSet.insert(layerToAdd);
         this->sort();
         // notify listeners
         fireLayerAdded(layerToAdd);
@@ -181,6 +185,7 @@ void RS_LayerList::remove(RS_Layer* layerToRemove) {
 
     // here the layer is removed from the list but not deleted
     m_layers.removeOne(layerToRemove);
+    m_layerSet.remove(layerToRemove);
 
     fireLayerRemoved(layerToRemove);
 
@@ -489,11 +494,11 @@ void RS_LayerList::setConstructionMulti(const QList<RS_Layer*>& layersNoConstruc
 }
 
 void RS_LayerList::toggleFreezeMulti(const QList<RS_Layer*>& layers) {
-    const int count = layers.count();
-    for (int i = 0; i < count; i++) {
-        RS_Layer* layer = layers.at(i);
-        if (layer != nullptr) {
+    QSet<RS_Layer*> toggled;
+    for (RS_Layer* layer : layers) {
+        if (layer != nullptr && !toggled.contains(layer)) {
             layer->toggle();
+            toggled.insert(layer);
         }
     }
     fireLayerToggled();

@@ -916,6 +916,8 @@ set (SHARED_SOURCES
      librecad/src/lib/engine/document/entities/rs_image.h
         librecad/src/lib/engine/document/entities/lc_wipeout.cpp
     librecad/src/lib/engine/document/entities/lc_wipeout.h
+    librecad/src/lib/engine/document/entities/lc_insert_transform.cpp
+    librecad/src/lib/engine/document/entities/lc_insert_transform.h
      librecad/src/lib/engine/document/entities/rs_insert.cpp
      librecad/src/lib/engine/document/entities/rs_insert.h
      librecad/src/lib/engine/document/entities/rs_leader.cpp
@@ -2409,6 +2411,7 @@ if (BUILD_TESTS)
         # librecad/src/lib/filters/tests/dwg_write_smoke_tests.cpp
         librecad/src/lib/filters/tests/eed_tests.cpp
         librecad/src/lib/filters/tests/dbcolor_tests.cpp
+        librecad/src/lib/filters/tests/family_exposure_tests.cpp
         librecad/src/lib/filters/tests/entity_metadata_tests.cpp
         librecad/src/lib/filters/tests/acsh_tests.cpp
         librecad/src/lib/filters/tests/acsh_shapes_tests.cpp
@@ -2429,6 +2432,7 @@ if (BUILD_TESTS)
         librecad/src/lib/filters/tests/underlay_tests.cpp
         librecad/src/lib/filters/tests/dxf_string_codec_tests.cpp
         librecad/src/lib/filters/tests/dxf_attribute_tests.cpp
+        librecad/src/lib/filters/tests/block_insert_wipeout_tests.cpp
         librecad/src/lib/filters/tests/dxf_object_tests.cpp
         librecad/src/lib/filters/tests/mpolygon_tests.cpp
         librecad/src/lib/filters/tests/mpolygon_dwg_tests.cpp
@@ -2449,7 +2453,9 @@ if (BUILD_TESTS)
         librecad/src/lib/filters/tests/i18n_caret_nfc_tests.cpp
         librecad/src/lib/filters/tests/dwg_decompress18_tests.cpp
         librecad/src/lib/filters/tests/dwg_tarch_tests.cpp
+        librecad/src/lib/filters/tests/datastorage_tests.cpp
         librecad/src/lib/engine/settings/tests/rs_settings_migration_tests.cpp
+        librecad/src/lib/gui/tests/rs_graphicview_close_tests.cpp
         librecad/src/main/tests/console_command_utils_tests.cpp
         # Shapelib safety-net tests.  shapelib sources are compiled into
         # librecad_lib (SHARED_SOURCES) since Phase 1b, so the test target
@@ -2486,6 +2492,13 @@ if (BUILD_TESTS)
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
     )
+    add_test(NAME phase_c_required_tags
+        COMMAND ${CMAKE_COMMAND}
+            -DTEST_EXECUTABLE=$<TARGET_FILE:librecad_tests>
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/librecad/src/lib/filters/tests/verify_phase_c_tags.cmake)
+    set_tests_properties(phase_c_required_tags PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif ()
 
 qt_add_executable(dwg_tarch_test

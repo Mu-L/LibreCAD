@@ -118,11 +118,11 @@ QString LC_QuickInfoEntityData::prepareGenericEntityDescription(const RS_Entity*
         result.append(" ").append(tr("ID"));
     }
 
+    // getLayer(true) already drops dangling post-import layer pointers.
     const RS_Layer* layer = e->getLayer(true);
-    QString layerName = "";
-    if (layer != nullptr) {
+    QString layerName;
+    if (layer != nullptr)
         layerName = layer->getName();
-    }
 
     result.append(tr("\nLayer: "));
     result.append(layerName);
@@ -277,6 +277,9 @@ QString LC_QuickInfoEntityData::getEntityDescription(RS_Entity* en, const RS2::E
  * @return true it view should be updated, false otherwise
  */
 bool LC_QuickInfoEntityData::processEntity(RS_Entity* en) {
+    if (en == nullptr || m_viewport == nullptr) {
+        return false;
+    }
     // no special value for empty id, yet according to implementation, it seems that 0 should not be used
     if (m_entityId != 0 && en->getId() == m_entityId) {
         // same entity... so we'll try to optimize a bit mouse move there.
@@ -505,11 +508,12 @@ bool LC_QuickInfoEntityData::updateForCoordinateViewMode(const int mode) {
 void LC_QuickInfoEntityData::collectGenericProperties(const RS_Entity* e) {
     RS_Pen pen = e->getPen(false);
     RS_Pen resolvedPen = e->getPen(true);
+    // getLayer(true) validates membership in the document layer list so
+    // hover quick-info does not SIGBUS on dangling block-entity layers.
     RS_Layer* layer = e->getLayer(true);
-    QString layerName = "";
-    if (layer != nullptr) {
+    QString layerName;
+    if (layer != nullptr)
         layerName = layer->getName();
-    }
 
     // visual attributes
     RS_Color color = pen.getColor();

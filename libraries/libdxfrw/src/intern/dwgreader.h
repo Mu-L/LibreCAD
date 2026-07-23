@@ -262,6 +262,8 @@ public:
     /// as reactors, filters, TABLECONTENT, dynamic-block graphs, etc.
     std::unordered_map<std::string, size_t> m_skippedUnsupportedObjects;
     std::vector<DRW_RawDwgSection> m_rawDwgSections;
+    //! Typed AcDb:AcDsPrototype_1b index (PR-2a). Parallel to raw section store.
+    std::vector<DRW_DataStorageSection> m_dataStorageSections;
     std::unordered_map<std::uint32_t, DRW_AppId*> appIdmap;
     std::unordered_map<std::uint32_t, DRW_View*> viewmap;
     std::unordered_map<std::uint32_t, DRW_UCS*> ucsmap;
@@ -302,6 +304,20 @@ protected:
 //    std::uint32_t blockCtrl;
     std::uint32_t nextEntLink{0};
     std::uint32_t prevEntLink{0};
+
+    template<typename T>
+    void emitWithExtrusion(T& e, DRW_Interface& intfa,
+                           void(DRW_Interface::*addFn)(const T&))
+    {
+        if (parent && parent->applyExt) {
+            if (!e.haveExtrusion
+                && (e.extPoint.x != 0.0 || e.extPoint.y != 0.0 || e.extPoint.z != 1.0)) {
+                e.haveExtrusion = true;
+            }
+            e.applyExtrusion();
+        }
+        (intfa.*addFn)(e);
+    }
 
 private:
     template <class T>

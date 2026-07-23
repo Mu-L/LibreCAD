@@ -2103,6 +2103,32 @@ bool DRW_ImageDef::parseDwg(DRW::Version version, dwgBuffer *buf, std::uint32_t 
     return buf->isGood();
 }
 
+// Inverse of DRW_ImageDef::parseDwg. Fixed object type 102 — body field
+// order matches libreDWG / makeRawImageDefObject in the write smoke tests.
+bool DRW_ImageDef::encodeDwg(DRW::Version version, dwgBufferW *buf,
+                              dwgBufferW *strBuf,
+                              dwgBufferW *handleBuf) const {
+    if (buf == nullptr)
+        return false;
+    dwgBufferW *sb = (strBuf != nullptr && version > DRW::AC1018) ? strBuf : buf;
+    dwgBufferW *hb = (handleBuf != nullptr && version > DRW::AC1018) ? handleBuf : buf;
+
+    buf->putBitLong(static_cast<std::int32_t>(imgVersion));
+    buf->putRawDouble(u);
+    buf->putRawDouble(v);
+    sb->putVariableText(version, name);
+    buf->putBit(loaded ? 1 : 0);
+    buf->putRawChar8(static_cast<std::uint8_t>(resolution));
+    buf->putRawDouble(up);
+    buf->putRawDouble(vp);
+
+    // Common object handle prefix + trailing xref null (parse consumes it).
+    putCommonObjectHandlePrefix(hb, static_cast<std::uint32_t>(parentHandle),
+                                numReactors, xDictFlag);
+    hb->putHandle(makeRefW(0, 0));  // xref null
+    return true;
+}
+
 bool DRW_PlotSettings::parseCode(int code, const std::unique_ptr<dxfReader>& reader){
     switch (code) {
     case 5:
@@ -3883,15 +3909,17 @@ bool DRW_Background::parseCode(int code, const std::unique_ptr<dxfReader>& reade
         if (m_kind == Gradient) m_horizon = reader->getDouble();
         else if (m_kind == Image) m_offset.x = reader->getDouble();
         break;
-    case 141: if (m_kind == Gradient) m_height = reader->getDouble(); break;
+    case 141:
+        if (m_kind == Gradient) m_height = reader->getDouble();
+        else if (m_kind == Image) m_offset.y = reader->getDouble();
+        break;
     case 142:
         if (m_kind == Gradient) m_rotation = reader->getDouble();
         else if (m_kind == Image) m_scale.x = reader->getDouble();
         break;
-    // NOTE: image-background offset.y/scale.y use DXF codes 240/242, which
-    // libdxfrw's dxfReader does not classify (the 240-269 range is an unhandled
-    // gap in dxfreader.cpp readRec) — those Y components are left to the raw-net
-    // until the reader's code-range table is extended.
+    case 143:
+        if (m_kind == Image) m_scale.y = reader->getDouble();
+        break;
     case 40:  if (m_kind == Ibl) m_rotation = reader->getDouble(); break;
     case 1:   if (m_kind == Ibl) m_iblName = reader->getUtf8String(); break;
     case 300: if (m_kind == Image) m_fileName = reader->getUtf8String(); break;
@@ -5876,6 +5904,19 @@ bool DRW_ImageDefinitionReactor::parseDwg(DRW::Version version, dwgBuffer *buf, 
     readCommonObjectHandles(buf, handle, numReactors, xDictFlag, &parentHandle);
     DRW_UNUSED(sBuf);
     return true;  // graceful-degrade: typed body + raw shelf both delivered
+}
+
+bool DRW_ImageDefinitionReactor::encodeDwg(DRW::Version version, dwgBufferW *buf,
+                                            dwgBufferW *strBuf,
+                                            dwgBufferW *handleBuf) const {
+    if (buf == nullptr)
+        return false;
+    DRW_UNUSED(strBuf);
+    dwgBufferW *hb = (handleBuf != nullptr && version > DRW::AC1018) ? handleBuf : buf;
+    buf->putBitLong(m_classVersion);
+    putCommonObjectHandlePrefix(hb, static_cast<std::uint32_t>(parentHandle),
+                                numReactors, xDictFlag);
+    return true;
 }
 
 bool DRW_SpatialFilter::parseCode(int code, const std::unique_ptr<dxfReader>& reader){

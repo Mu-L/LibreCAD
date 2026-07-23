@@ -529,7 +529,19 @@ bool dwgRW::writeMLine(DRW_MLine *ent) {
 }
 
 bool dwgRW::writeUnderlay(DRW_Underlay *ent) {
+    if (ent == nullptr)
+        return recordWriteResult(WriteSkipKind::Entity, false);
+    // Entity custom class must be in CLASSES before the body is encoded.
+    if (!registerUnderlayEntityClass(ent->kind))
+        return recordWriteResult(WriteSkipKind::ClassRegistration, false);
     return encodeEntityForWrite(ent);
+}
+
+bool dwgRW::registerUnderlayEntityClass(DRW_Underlay::Kind kind) {
+    if (writer == nullptr)
+        return recordWriteResult(WriteSkipKind::ClassRegistration, false);
+    return recordWriteResult(WriteSkipKind::ClassRegistration,
+                             writer->registerUnderlayEntityClass(kind));
 }
 
 bool dwgRW::writePolyline(DRW_Polyline *ent) {
@@ -593,11 +605,98 @@ bool dwgRW::writeOle2Frame(DRW_Ole2Frame *ent) {
     return encodeEntityForWrite(ent);
 }
 
+// Table-record add* methods — forward to dwgWriter15 via dynamic_cast since
+// the add*() API lives on dwgWriter15 (all concrete writers derive from it).
+// Declared early so entity writers (IMAGE / IMAGEDEF) can reuse it.
+static dwgWriter15 *asWriter15(std::unique_ptr<dwgWriter> &w) {
+    return dynamic_cast<dwgWriter15 *>(w.get());
+}
+
 bool dwgRW::writeMesh(DRW_Mesh *ent) {
     return encodeEntityForWrite(ent);
 }
 
 bool dwgRW::writeWipeout(DRW_Wipeout *ent) {
+    if (ent == nullptr)
+        return recordWriteResult(WriteSkipKind::Entity, false);
+    // Ensure WIPEOUT custom class is present (bootstrap also registers 530).
+    if (!registerWipeoutEntityClass())
+        return recordWriteResult(WriteSkipKind::ClassRegistration, false);
+    return encodeEntityForWrite(ent);
+}
+
+bool dwgRW::writeImageDef(DRW_ImageDef *object) {
+    auto *w = asWriter15(writer);
+    if (w == nullptr || object == nullptr)
+        return recordWriteResult(WriteSkipKind::Object, false);
+    return recordWriteResult(WriteSkipKind::Object, w->writeImageDef(*object));
+}
+
+bool dwgRW::writeImageDefinitionReactor(DRW_ImageDefinitionReactor *object) {
+    auto *w = asWriter15(writer);
+    if (w == nullptr || object == nullptr)
+        return recordWriteResult(WriteSkipKind::Object, false);
+    return recordWriteResult(WriteSkipKind::Object,
+                             w->writeImageDefinitionReactor(*object));
+}
+
+bool dwgRW::registerImageDefReactorObjectClass(
+    DRW_ImageDefinitionReactor *object) {
+    if (writer == nullptr)
+        return recordWriteResult(WriteSkipKind::ClassRegistration, false);
+    const std::uint32_t handle = object != nullptr ? object->handle : 0;
+    return recordWriteResult(WriteSkipKind::ClassRegistration,
+                             writer->registerImageDefReactorObjectClass(handle));
+}
+
+bool dwgRW::writeImage(DRW_Image *ent, const std::string *fileName) {
+    if (ent == nullptr)
+        return recordWriteResult(WriteSkipKind::Entity, false);
+
+    // When a path is provided, emit IMAGEDEF + reactor and wire handles so
+    // re-read delivers both the entity frame and linkImage().
+    if (fileName != nullptr && !fileName->empty()) {
+        auto *w = asWriter15(writer);
+        if (w == nullptr)
+            return recordWriteResult(WriteSkipKind::Entity, false);
+
+        DRW_ImageDef imageDef;
+        imageDef.name = *fileName;
+        imageDef.imgVersion = 0;
+        imageDef.u = ent->sizeu;
+        imageDef.v = ent->sizev;
+        imageDef.up = 1.0;
+        imageDef.vp = 1.0;
+        imageDef.loaded = 1;
+        imageDef.resolution = 0;
+        imageDef.parentHandle = 0xC;  // named object dictionary default owner
+        if (!w->writeImageDef(imageDef))
+            return recordWriteResult(WriteSkipKind::Object, false);
+
+        // Allocate the image entity handle before the reactor so the reactor
+        // can name the image as its owner when the caller left it unset.
+        if (ent->handle == 0)
+            ent->handle = w->allocNextHandle();
+        else
+            w->reserveHandle(ent->handle);
+
+        DRW_ImageDefinitionReactor reactor;
+        reactor.m_classVersion = 2;
+        reactor.parentHandle = static_cast<int>(ent->handle);
+        if (!w->writeImageDefinitionReactor(reactor))
+            return recordWriteResult(WriteSkipKind::Object, false);
+
+        ent->ref = imageDef.handle;
+        ent->m_imageDefReactorHandle = reactor.handle;
+    }
+
+    // IMAGE uses fixed oType 101 — no custom class registration.
+    if (ent->m_clipBoundaryType == 0 && ent->clipPath.empty()) {
+        // Default full-image rectangle so encodeDwg accepts a fresh IMAGE.
+        ent->m_clipBoundaryType = 1;
+        ent->clipPath = {DRW_Coord{-0.5, -0.5, 0.0},
+                         DRW_Coord{ent->sizeu - 0.5, ent->sizev - 0.5, 0.0}};
+    }
     return encodeEntityForWrite(ent);
 }
 
@@ -624,10 +723,12 @@ std::uint32_t dwgRW::defineBlock(const std::string& name, const DRW_Coord& baseP
     return handle;
 }
 
-// Table-record add* methods — forward to dwgWriter15 via dynamic_cast since
-// the add*() API lives on dwgWriter15 (all concrete writers derive from it).
-static dwgWriter15 *asWriter15(std::unique_ptr<dwgWriter> &w) {
-    return dynamic_cast<dwgWriter15 *>(w.get());
+bool dwgRW::beginBlockContent(std::uint32_t blockRecordHandle) {
+    return writer != nullptr && writer->beginBlockContent(blockRecordHandle);
+}
+
+bool dwgRW::endBlockContent() {
+    return writer != nullptr && writer->endBlockContent();
 }
 
 bool dwgRW::addLType(DRW_LType *ent) {
@@ -803,6 +904,13 @@ bool dwgRW::registerWipeoutVariablesObjectClass(DRW_WipeoutVariables *object) {
         writer->reserveHandle(object->handle);
     return recordWriteResult(WriteSkipKind::ClassRegistration,
                              writer->registerWipeoutVariablesObjectClass(object->handle));
+}
+
+bool dwgRW::registerWipeoutEntityClass() {
+    if (writer == nullptr)
+        return recordWriteResult(WriteSkipKind::ClassRegistration, false);
+    return recordWriteResult(WriteSkipKind::ClassRegistration,
+                             writer->registerWipeoutEntityClass());
 }
 
 bool dwgRW::writeWipeoutVariables(DRW_WipeoutVariables *object) {
@@ -1042,10 +1150,10 @@ bool dwgRW::writeUnderlayDefinition(DRW_UnderlayDefinition *object) {
 bool dwgRW::registerRawDwgObjectClass(const DRW_UnsupportedObject *object) {
     if (object == nullptr || writer == nullptr)
         return recordWriteResult(WriteSkipKind::ClassRegistration, false);
-    if (object->m_handle != 0)
+    const bool registered = writer->registerRawObjectClass(*object);
+    if (registered && object->m_handle != 0)
         writer->reserveHandle(object->m_handle);
-    return recordWriteResult(WriteSkipKind::ClassRegistration,
-                             writer->registerRawObjectClass(*object));
+    return recordWriteResult(WriteSkipKind::ClassRegistration, registered);
 }
 
 bool dwgRW::writeRawDwgObject(DRW_UnsupportedObject *object) {
@@ -1205,7 +1313,18 @@ bool dwgRW::processDwg() {
         ret = ret2;
     }
 
-    ret2 = reader->readDwgTables(hdr);
+    // readDwgTables/Blocks/Entities/Objects all depend on a valid header,
+    // classes map and object handle map from the phases above -- on a
+    // corrupted file where one of those already failed (ret is false),
+    // running them anyway walks whatever ended up in ObjectMap (empty,
+    // partial, or built from garbage offsets) and pays full CRC/decompress
+    // cost per bogus "entity"/"object" before each is individually reported
+    // as a parse failure. `ret &&` short-circuits the call once ret is
+    // false, turning that multi-second futile parse into a fast, clear
+    // error return; the already-set error code (from whichever phase failed
+    // first) is preserved, matching the existing "first failure wins"
+    // pattern below.
+    ret2 = ret && reader->readDwgTables(hdr);
     if (ret && !ret2) {
         error = DRW::BAD_READ_TABLES;
         ret = ret2;
@@ -1252,19 +1371,19 @@ bool dwgRW::processDwg() {
         iface->addUCS(const_cast<DRW_UCS&>(*u));
     }
 
-    ret2 = reader->readDwgBlocks(*iface);
+    ret2 = ret && reader->readDwgBlocks(*iface);
     if (ret && !ret2) {
         error = DRW::BAD_READ_BLOCKS;
         ret = ret2;
     }
 
-    ret2 = reader->readDwgEntities(*iface);
+    ret2 = ret && reader->readDwgEntities(*iface);
     if (ret && !ret2) {
         error = DRW::BAD_READ_ENTITIES;
         ret = ret2;
     }
 
-    ret2 = reader->readDwgObjects(*iface);
+    ret2 = ret && reader->readDwgObjects(*iface);
     if (ret && !ret2) {
         error = DRW::BAD_READ_OBJECTS;
         ret = ret2;
@@ -1273,6 +1392,8 @@ bool dwgRW::processDwg() {
     if (ret) {
         for (const DRW_RawDwgSection& section : reader->m_rawDwgSections)
             iface->addRawDwgSection(section);
+        for (const DRW_DataStorageSection& storage : reader->m_dataStorageSections)
+            iface->addDataStorage(storage);
     }
 
     return ret;
